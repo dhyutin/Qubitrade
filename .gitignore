@@ -41,8 +41,3 @@ workspace/*-starter/
 # Prep + working dirs — kept local only
 Hackathon_1.0/
 workspace/
-
-# Planning + gate docs — local only
-PLAN.md
-SETUP_CONFIRM.md
-*.md
