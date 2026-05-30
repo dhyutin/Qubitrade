@@ -1,0 +1,48 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Envs
+.venv/
+venv/
+env/
+.python-version
+
+# Secrets
+.env
+.env.*
+*.key
+*.pem
+secrets.json
+
+# Data + model artifacts (large)
+data/
+*.parquet
+*.pkl
+*.pt
+*.ckpt
+results/checkpoints/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Cloned starters (they have their own git history)
+workspace/*-starter/
+
+# Prep + working dirs — kept local only
+Hackathon_1.0/
+workspace/
+
+# Planning + gate docs — local only
+PLAN.md
+SETUP_CONFIRM.md
+*.md
