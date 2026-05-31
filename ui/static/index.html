@@ -17,43 +17,161 @@
           <p class="tagline">Quantum market memory — <span class="black-key">real</span> vs <span class="green-key">prediction</span></p>
         </div>
       </div>
-      <div id="stub-badge" class="stub-badge" hidden>prediction: stub</div>
+      <div class="view-tabs">
+        <button class="vtab active" data-view="chart">Chart View</button>
+        <button class="vtab" data-view="ppo">PPO Trader</button>
+      </div>
     </header>
 
-    <!-- TOP: ticker selector -->
-    <section class="tickers" id="tickers"></section>
+    <!-- ═══════════════════════ CHART VIEW ═══════════════════════ -->
+    <div id="view-chart">
+      <section class="tickers" id="tickers"></section>
+      <section class="stats" id="stats"></section>
 
-    <!-- STAT STRIP -->
-    <section class="stats" id="stats"></section>
+      <section class="main-grid">
+        <!-- Left: price chart -->
+        <div class="chart-wrap">
+          <div id="chart"></div>
+          <div id="skeleton" class="skeleton" hidden></div>
+        </div>
 
-    <!-- MIDDLE: chart + analog panel -->
-    <section class="main-grid">
-      <div class="chart-wrap">
-        <div id="chart"></div>
-        <div id="skeleton" class="skeleton" hidden></div>
+        <!-- Right: integrated Q-Atlas panel -->
+        <aside class="qa-panel" id="qa-panel">
+          <div class="qa-panel-header">
+            <div class="qa-panel-header-row1">
+              <span class="qa-panel-logo">⚛</span>
+              <span class="qa-panel-title">Quantum Analog</span>
+              <span id="qa-panel-status" class="qa-panel-status">select a ticker</span>
+            </div>
+            <div class="qa-panel-header-row2">
+              <button id="qa-live-btn" class="qa-live-btn" title="Query using today's live signals">⚡ LIVE</button>
+              <input type="date" id="qa-panel-date" class="qa-panel-date" title="Pick a date to zoom the chart" />
+              <button id="qa-panel-clear-date" class="qa-panel-clear-btn" title="Clear date / reset chart" hidden>×</button>
+              <button id="qa-panel-run" class="qa-panel-run-btn" title="Re-run Q-Atlas for selected date">↺</button>
+            </div>
+          </div>
+
+          <!-- Gemini narrative — top, most prominent -->
+          <div id="qa-panel-narrative" class="qa-panel-narrative">
+            <span class="qa-panel-empty">Click any ticker above to run the quantum kernel and see AI-powered regime analysis.</span>
+          </div>
+
+          <!-- Consensus badge -->
+          <div id="qa-panel-consensus" class="qa-panel-consensus" hidden></div>
+
+          <!-- Compact analog cards -->
+          <div id="qa-panel-cards" class="qa-panel-cards"></div>
+
+          <!-- News drawer: headlines from analog dates -->
+          <div id="qa-news-drawer" class="qa-news-drawer" hidden>
+            <div class="qa-news-drawer-header">
+              <span class="qa-news-drawer-title">News from analog dates</span>
+              <button id="qa-news-close" class="qa-news-close">×</button>
+            </div>
+            <div id="qa-news-content" class="qa-news-content"></div>
+          </div>
+
+          <!-- Kernel info footer -->
+          <div id="qa-panel-method" class="qa-panel-method">
+            <span class="qa-method-text"></span>
+            <button id="qa-news-toggle" class="qa-news-toggle-btn" hidden>📰 Analog news</button>
+          </div>
+        </aside>
+      </section>
+
+      <!-- Extended visuals: regime comparison + radar (scroll to see) -->
+      <div id="qa-extended" class="qa-extended" hidden>
+        <div class="qa-extended-bar">
+          <span style="font-size:15px">⚛</span>
+          <span class="qa-extended-label">Regime analysis</span>
+          <span id="qa-extended-method" class="qa-method-tag"></span>
+        </div>
+        <div class="qa-charts-row">
+          <div class="qa-chart-wrap">
+            <div class="qa-chart-header">
+              <span class="qa-chart-title">Regime price comparison</span>
+              <span class="qa-chart-sub">Normalized to 0% at analog date · dotted = query · colored = analogs</span>
+            </div>
+            <div id="qa-chart"></div>
+          </div>
+          <div class="qa-chart-wrap">
+            <div class="qa-chart-header">
+              <span class="qa-chart-title">Feature-space similarity</span>
+              <span class="qa-chart-sub">4-dim ZZFeatureMap state · dotted = query · colored = analogs</span>
+            </div>
+            <div id="qa-radar"></div>
+          </div>
+        </div>
       </div>
 
-      <aside class="analog-panel">
-        <h2>Most similar regimes <span class="q-tag">⚛ kernel</span></h2>
-        <p id="narration" class="narration"></p>
-        <div id="analogs" class="analog-list"></div>
-        <p id="analog-method" class="method"></p>
-      </aside>
-    </section>
+      <footer class="bottombar">
+        <div class="timeframes" id="timeframes"></div>
+        <div class="model-picker">
+          <label for="model">model</label>
+          <select id="model"></select>
+        </div>
+        <div class="forecast">
+          <label for="forecast">forecast <span id="forecast-val">5</span>d</label>
+          <input type="range" id="forecast" min="0" max="40" value="5" />
+        </div>
+      </footer>
+    </div>
 
-    <!-- BOTTOM: timeframe selector + controls -->
-    <footer class="bottombar">
-      <div class="timeframes" id="timeframes"></div>
-      <div class="model-picker">
-        <label for="model">model</label>
-        <select id="model"></select>
-        <div id="model-card" class="model-card" hidden></div>
+    <!-- ═══════════════════════ PPO TRADER ═══════════════════════ -->
+    <div id="view-ppo" hidden>
+      <div class="ppo-summary-bar" id="ppo-summary-bar">Loading PPO trajectory…</div>
+
+      <div class="ppo-mode-bar">
+        <div class="ppo-mode-toggle">
+          <span class="ppo-label">Data</span>
+          <button class="ppo-btn active" id="ppo-mode-hist" title="Historical test window 2019-2020">Historical 2019–20</button>
+          <button class="ppo-btn" id="ppo-mode-live" title="Live yfinance data 2024-present">Live 2024–present</button>
+        </div>
+        <div class="ppo-daterange">
+          <span class="ppo-label">Range</span>
+          <input type="date" id="ppo-range-start" class="ppo-date-input" />
+          <span class="ppo-label">→</span>
+          <input type="date" id="ppo-range-end"   class="ppo-date-input" />
+          <button class="ppo-btn" id="ppo-range-apply">Apply</button>
+          <button class="ppo-btn muted" id="ppo-range-reset">Full</button>
+        </div>
+        <div id="ppo-mode-badge" class="ppo-mode-badge">historical</div>
       </div>
-      <div class="forecast">
-        <label for="forecast">forecast <span id="forecast-val">10</span>d</label>
-        <input type="range" id="forecast" min="0" max="40" value="10" />
+
+      <div class="ppo-controls">
+        <div class="ppo-step-info">
+          <span class="ppo-label">Day</span>
+          <span id="ppo-step-cur">1</span><span class="ppo-label">/ </span><span id="ppo-step-total">–</span>
+          <span id="ppo-date" class="ppo-date">–</span>
+        </div>
+        <div class="ppo-nav-btns">
+          <button class="ppo-btn" id="ppo-prev" title="Step back">◀</button>
+          <button class="ppo-btn accent" id="ppo-play" title="Auto-play">▶ Play</button>
+          <button class="ppo-btn" id="ppo-next" title="Step forward">▶</button>
+        </div>
+        <div class="ppo-action-btns">
+          <button class="ppo-btn green" id="ppo-copy" title="Copy PPO weights">Copy PPO</button>
+          <button class="ppo-btn amber" id="ppo-blind" title="Follow PPO to end">Follow PPO →End</button>
+          <button class="ppo-btn muted" id="ppo-reset" title="Reset positions">Reset</button>
+        </div>
       </div>
-    </footer>
+
+      <div class="ppo-main-grid">
+        <div class="ppo-chart-wrap">
+          <div id="ppo-chart"></div>
+        </div>
+        <div class="ppo-right-panel">
+          <div class="ppo-right-header">
+            <span>Ticker</span>
+            <span>PPO weight</span>
+            <span>Your pos</span>
+          </div>
+          <div id="ppo-ticker-rows" class="ppo-ticker-rows"></div>
+        </div>
+      </div>
+
+      <div class="ppo-analytics-strip" id="ppo-analytics-strip"></div>
+    </div>
   </div>
 
   <script src="/static/app.js"></script>

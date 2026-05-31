@@ -18,13 +18,33 @@ env/
 *.pem
 secrets.json
 
-# Data + model artifacts (large)
+# Data + model artifacts (large files — kept local only)
 data/
 *.parquet
 *.pkl
 *.pt
 *.ckpt
+*.npy
+*.zip
+*.csv
 results/checkpoints/
+
+# Generated images / dashboards
+*.png
+*.jpg
+*.jpeg
+
+# Presentation deck
+*.pptx
+*.ppt
+
+# Node
+node_modules/
+package-lock.json
+package.json
+
+# Misc scripts not part of submission
+make_deck.js
 
 # OS
 .DS_Store
@@ -38,6 +58,6 @@ Thumbs.db
 # Cloned starters (they have their own git history)
 workspace/*-starter/
 
-# Prep + working dirs — kept local only
+# Workspace — all generated data/models kept local only
 Hackathon_1.0/
 workspace/

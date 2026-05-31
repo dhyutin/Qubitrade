@@ -78,10 +78,13 @@ def predict(
     n = len(ts)
     H = pipeline.FORECAST_HORIZON_DAYS  # 5
 
-    # Pick where the overlap region starts. Keep the old heuristic so the
-    # split-date dashed line in the UI stays in a familiar spot.
-    overlap = min(max(n // 3, 5), 45)
-    split_idx = max(n - overlap, 0)
+    # Overlap region starts at the test split date when data spans it, so the
+    # green line covers the full 2019-2020 test window instead of just ~45 bars.
+    test_start_ts = pd.Timestamp(pipeline.TEST_START_DATE)
+    if ts[0] < test_start_ts <= ts[-1]:
+        split_idx = next((i for i, t in enumerate(ts) if t >= test_start_ts), n - 5)
+    else:
+        split_idx = max(n - min(max(n // 3, 5), 45), 0)
     split_ts = ts[split_idx]
 
     # Run the chosen model end-to-end. Cached behind pipeline.
