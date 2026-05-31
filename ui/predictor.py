@@ -1,29 +1,38 @@
 """
 Prediction plug-in for the Qubitrade UI.
 
-Wraps the LightGBM alpha model (trained in `02_alpha_models.ipynb`) behind the
-contract the front end expects: a green-line price path that overlaps the tail
-of the real series and extends `forecast_days` business days into the future.
+Wraps the alpha models trained in `02_alpha_models.ipynb` behind the contract
+the front end expects: a green-line price path that overlaps the tail of the
+real series (showing what the model said about each day H business days ago)
+and extends `forecast_days` business days into the future.
 
 Contract
 --------
-predict(ticker, dates, closes, forecast_days) -> {
-    "pred_dates": [ISO date str, ...],   # ascending; overlaps the tail of the
-                                         # real series, then extends into the
-                                         # future by `forecast_days`
-    "pred_close": [float, ...],          # predicted price path (green line),
-                                         # aligned 1:1 with pred_dates
-    "pred_upper": [float, ...],          # upper edge of the confidence band
-    "pred_lower": [float, ...],          # lower edge of the confidence band
-    "split_date": ISO date str,          # where the green line is anchored
-    "is_stub": bool,
+predict(ticker, dates, closes, forecast_days, model) -> {
+    "pred_dates":  [ISO date str, ...],   # ascending overlap + forecast
+    "pred_close":  [float, ...],          # predicted price path (green line)
+    "pred_upper":  [float, ...],          # upper edge of the confidence band
+    "pred_lower":  [float, ...],          # lower edge of the confidence band
+    "split_date":  ISO date str,          # where the overlap region starts
+    "is_stub":     bool,
 }
 
-The model predicts a 5-day forward return per (date, ticker). To draw a daily
-green line we treat each prediction as the daily-equivalent return implied by
-the most recent 5d outlook: r_daily = (1 + r_fwd5)^(1/5) - 1, then compound:
-    price[0]   = real_close[split_date]
-    price[t+1] = price[t] * (1 + r_daily[t])
+Visual model
+------------
+Each model predicts a 5-day forward return per (date, ticker). The old version
+compounded the same daily-equivalent return every step, producing a smooth
+monotonic curve that looked the same for every model — boring.
+
+The new formulation makes the green line actually show the model in action:
+
+  Overlap (visible real bars):
+      green(t) = real(t - H) × (1 + pred_fwd5(t - H))
+      i.e. "what the model said H days ago about today's price"
+      → weaves above/below the white line based on actual model calls.
+
+  Forecast (no real bars yet):
+      anchored at real(today); compounds the latest 5d outlook into a smooth
+      fan, with a vol-scaled confidence band that widens as sqrt(horizon).
 """
 
 from __future__ import annotations
@@ -37,16 +46,17 @@ import pipeline
 STUB = False
 
 
-def _fwd5_to_daily(r_fwd5: float) -> float:
-    if pd.isna(r_fwd5):
-        return 0.0
-    # (1 + r)^(1/H) - 1, safe-guarded against tiny negatives that would NaN.
-    base = max(1.0 + float(r_fwd5), 1e-6)
-    return base ** (1.0 / pipeline.FORECAST_HORIZON_DAYS) - 1.0
-
-
 def _future_business_days(last_date: pd.Timestamp, n: int) -> list[pd.Timestamp]:
     return list(pd.bdate_range(start=last_date + pd.Timedelta(days=1), periods=n))
+
+
+def _safe_daily(last_fwd5: float, horizon: int) -> float:
+    """Daily-equivalent return from an H-day forward return, guarded against
+    negative bases that would NaN under fractional powers."""
+    if pd.isna(last_fwd5):
+        return 0.0
+    base = max(1.0 + float(last_fwd5), 1e-6)
+    return base ** (1.0 / horizon) - 1.0
 
 
 def predict(
@@ -65,74 +75,73 @@ def predict(
         }
 
     ts = [pd.Timestamp(d) for d in dates]
-    n = len(closes)
+    n = len(ts)
+    H = pipeline.FORECAST_HORIZON_DAYS  # 5
 
-    # Same overlap heuristic the old stub used — start the green line partway
-    # through the visible window so users can see model vs. real before the
-    # forecast region.
+    # Pick where the overlap region starts. Keep the old heuristic so the
+    # split-date dashed line in the UI stays in a familiar spot.
     overlap = min(max(n // 3, 5), 45)
     split_idx = max(n - overlap, 0)
     split_ts = ts[split_idx]
-    anchor_price = closes[split_idx]
 
     # Run the chosen model end-to-end. Cached behind pipeline.
     try:
         pred_fwd5 = pipeline.predict_fwd5_returns(ticker.upper(), model=model)
     except Exception:
         pred_fwd5 = pd.Series(dtype=float)
+    pred_lookup = pred_fwd5.to_dict() if not pred_fwd5.empty else {}
 
-    # Target dates the green line should land on after the anchor: each
-    # overlap date except the split itself, plus the forward horizon.
-    overlap_targets = ts[split_idx + 1:]
-    future_targets = _future_business_days(ts[-1], forecast_days)
+    # ----- Overlap: predicted-vs-realized -----
+    # For each visible date d, green(d) = real_close(d-H) × (1 + pred_fwd5(d-H)).
+    # Fall back to the live real bar when no prediction is available — keeps
+    # the line continuous instead of cratering on missing dates.
+    overlap_dates: list[pd.Timestamp] = []
+    overlap_close: list[float] = []
+    for i in range(split_idx, n):
+        src = i - H
+        if src < 0:
+            continue
+        src_date = ts[src]
+        r = pred_lookup.get(src_date)
+        if r is None or pd.isna(r):
+            green = float(closes[i])
+        else:
+            green = float(closes[src]) * (1.0 + float(r))
+        overlap_dates.append(ts[i])
+        overlap_close.append(green)
 
-    if pred_fwd5.empty:
-        overlap_returns = [0.0] * len(overlap_targets)
-        last_daily = 0.0
-    else:
-        pred_daily = pred_fwd5.apply(_fwd5_to_daily)
-        # Return at date t drives price from t -> t+1, so to land at overlap_targets
-        # we source returns from the preceding dates (split_ts ... ts[-2]).
-        overlap_sources = ts[split_idx:-1]
-        overlap_returns = (
-            pred_daily.reindex(overlap_sources, method="ffill").fillna(0.0).tolist()
-        )
-        last_daily = float(pred_daily.iloc[-1])
+    # ----- Forecast: anchor at today, compound the latest 5d outlook -----
+    last_real = float(closes[-1])
+    last_pred = float(pred_fwd5.iloc[-1]) if not pred_fwd5.empty else 0.0
+    daily_rate = _safe_daily(last_pred, H)
 
-    future_returns = [last_daily] * len(future_targets)
-    all_targets = list(overlap_targets) + list(future_targets)
-    all_returns = overlap_returns + future_returns
+    future_dates = _future_business_days(ts[-1], forecast_days)
+    future_close = [last_real * (1.0 + daily_rate) ** k for k in range(1, len(future_dates) + 1)]
 
-    # Reconstruct the price path from anchor + per-step returns.
-    pred_close = [anchor_price]
-    for r in all_returns:
-        if pd.isna(r) or math.isinf(r):
-            r = 0.0
-        pred_close.append(pred_close[-1] * (1.0 + float(r)))
+    pred_dates_ts = overlap_dates + future_dates
+    pred_close = overlap_close + future_close
 
-    pred_dates_ts = [split_ts] + all_targets
-    pred_dates = [d.strftime("%Y-%m-%d") for d in pred_dates_ts]
-
-    # Confidence band: widens with the forecast horizon (~ vol * sqrt(t)),
-    # zero inside the overlap region where we can still see the real price.
+    # ----- Confidence band -----
+    # Vol-scaled (~1.96 σ × √h) and zero inside the overlap region where users
+    # can read accuracy directly off the white line.
     if len(closes) >= 12:
         rets = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes))]
-        daily_vol = (sum(r * r for r in rets[-30:]) / min(len(rets), 30)) ** 0.5
+        recent = rets[-30:]
+        daily_vol = (sum(r * r for r in recent) / len(recent)) ** 0.5
     else:
         daily_vol = 0.0
-    # Overlap region = anchor + every overlap target (all have real bars); the
-    # forecast region begins right after. The band stays zero across the
-    # overlap and widens only into the forecast.
-    last_overlap_idx = len(overlap_targets)  # index of the last real bar in pred_close
-    pred_upper, pred_lower = [], []
+
+    n_overlap = len(overlap_dates)
+    pred_upper: list[float] = []
+    pred_lower: list[float] = []
     for i, p in enumerate(pred_close):
-        future_step = max(i - last_overlap_idx, 0)   # 0 until forecast starts
+        future_step = max(i - n_overlap + 1, 0)
         width = p * daily_vol * 1.96 * math.sqrt(future_step)
         pred_upper.append(round(p + width, 4))
         pred_lower.append(round(p - width, 4))
 
     return {
-        "pred_dates": pred_dates,
+        "pred_dates": [d.strftime("%Y-%m-%d") for d in pred_dates_ts],
         "pred_close": [round(float(p), 4) for p in pred_close],
         "pred_upper": pred_upper,
         "pred_lower": pred_lower,

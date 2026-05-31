@@ -13,12 +13,17 @@ const el = {
   forecast: document.getElementById("forecast"),
   forecastVal: document.getElementById("forecast-val"),
   model: document.getElementById("model"),
+  modelCard: document.getElementById("model-card"),
   stubBadge: document.getElementById("stub-badge"),
   stats: document.getElementById("stats"),
   analogs: document.getElementById("analogs"),
   narration: document.getElementById("narration"),
   analogMethod: document.getElementById("analog-method"),
 };
+
+// Populated by renderModels — keeps full per-model info (desc + metrics) so
+// the model-card can refresh on dropdown change without another fetch.
+const modelInfo = new Map();
 
 const fmtPct = (v) => (v == null ? "–" : `${v >= 0 ? "+" : ""}${v.toFixed(2)}%`);
 const arrow = (v) => (v >= 0 ? "▴" : "▾");
@@ -40,6 +45,7 @@ async function boot() {
 
   el.model.addEventListener("change", () => {
     state.model = el.model.value;
+    renderModelCard(state.model);
     refresh();
   });
 
@@ -81,7 +87,9 @@ function renderTimeframes(tfs) {
 
 function renderModels(models) {
   el.model.innerHTML = "";
+  modelInfo.clear();
   for (const m of models) {
+    modelInfo.set(m.key, m);
     const opt = document.createElement("option");
     opt.value = m.key;
     opt.textContent = m.label;
@@ -89,6 +97,34 @@ function renderModels(models) {
     if (m.key === state.model) opt.selected = true;
     el.model.appendChild(opt);
   }
+  // Default to the first available model if the saved choice is gone.
+  if (!modelInfo.has(state.model) && models.length) {
+    state.model = models[0].key;
+    el.model.value = state.model;
+  }
+  renderModelCard(state.model);
+}
+
+function renderModelCard(key) {
+  const m = modelInfo.get(key);
+  if (!m) { el.modelCard.hidden = true; return; }
+  const mt = m.metrics || {};
+  const fmt = (v, pct) =>
+    v == null ? "–" : pct ? `${(v * 100).toFixed(1)}%` : v.toFixed(3);
+  el.modelCard.hidden = false;
+  el.modelCard.innerHTML = `
+    <div class="mc-desc">${m.desc || ""}</div>
+    <div class="mc-metrics">
+      <span title="Spearman IC vs realized 5-day return (notebook backtest)">
+        IC <b>${fmt(mt.ic, false)}</b>
+      </span>
+      <span title="Directional accuracy in the notebook backtest">
+        dir <b>${fmt(mt.dir_acc, true)}</b>
+      </span>
+      <span title="Long-short Sharpe (annualized) in the notebook backtest">
+        Sharpe <b>${fmt(mt.sharpe, false)}</b>
+      </span>
+    </div>`;
 }
 
 function selectTicker(t) {
