@@ -3,7 +3,7 @@
 // green line = prediction (+ confidence band). Right panel = quantum-kernel
 // analog regimes. Stat strip = today's move, predicted move, hit-rate.
 
-const state = { ticker: "NVDA", timeframe: "3M", forecast: 10, model: "lightgbm" };
+const state = { ticker: "NVDA", timeframe: "ALL", forecast: 5, model: "lightgbm" };
 
 const el = {
   tickers: document.getElementById("tickers"),
@@ -279,6 +279,48 @@ function draw(data) {
   };
 
   const shapes = [];
+  const annotations = [];
+
+  // Train region (blue tint)
+  if (data.data_start && data.train_end) {
+    shapes.push({
+      type: "rect", xref: "x", yref: "paper",
+      x0: data.data_start, x1: data.train_end,
+      y0: 0, y1: 1,
+      fillcolor: "rgba(79,124,255,0.07)", line: { width: 0 }, layer: "below",
+    });
+    annotations.push({
+      x: data.data_start, y: 0.97, xref: "x", yref: "paper",
+      text: "Train  2013–2018", showarrow: false,
+      font: { color: "#4f7cff", size: 10 }, xanchor: "left",
+    });
+  }
+
+  // Test region (amber tint)
+  if (data.test_start && data.data_end) {
+    shapes.push({
+      type: "rect", xref: "x", yref: "paper",
+      x0: data.test_start, x1: data.data_end,
+      y0: 0, y1: 1,
+      fillcolor: "rgba(255,183,77,0.09)", line: { width: 0 }, layer: "below",
+    });
+    annotations.push({
+      x: data.data_end, y: 0.97, xref: "x", yref: "paper",
+      text: "Test  2019–2020", showarrow: false,
+      font: { color: "#ffb74d", size: 10 }, xanchor: "right",
+    });
+  }
+
+  // Train/test boundary line
+  if (data.test_start) {
+    shapes.push({
+      type: "line", x0: data.test_start, x1: data.test_start,
+      yref: "paper", y0: 0, y1: 1,
+      line: { color: "#4f7cff", width: 1, dash: "dash" },
+    });
+  }
+
+  // Model split-date line (where overlap region starts)
   if (p.split_date) {
     shapes.push({
       type: "line", x0: p.split_date, x1: p.split_date,
@@ -310,6 +352,7 @@ function draw(data) {
       font: { color: "#e7ebf3" },
     },
     shapes,
+    annotations,
     showlegend: true,
     transition: { duration: 350, easing: "cubic-in-out" },
   };

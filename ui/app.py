@@ -37,9 +37,18 @@ SECTOR_LABEL = {
     "cons": "Consumer", "eng": "Energy/Ind.",
 }
 
-# Timeframe -> number of trailing calendar days to show.
+# Timeframe options shown in the UI.
+# "ALL"   -> full 2013-2020 window
+# "TRAIN" -> training period  2013-2018
+# "TEST"  -> test period      2019-2020
+# integers -> trailing N calendar days from the end of the dataset
 TIMEFRAMES = {
-    "1W": 7, "1M": 30, "3M": 90, "6M": 180, "1Y": 365, "ALL": None,
+    "ALL":   None,
+    "TRAIN": "train",
+    "TEST":  "test",
+    "1Y":    365,
+    "6M":    180,
+    "3M":    90,
 }
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -58,8 +67,8 @@ def _fetch_full_history(ticker: str) -> pd.DataFrame:
     if cached and now - cached[0] < _CACHE_TTL:
         return cached[1]
 
-    raw = yf.download(ticker, period="2y", interval="1d",
-                      progress=False, auto_adjust=True)
+    raw = yf.download(ticker, start=pipeline.DATA_START, end=pipeline.DATA_END,
+                      interval="1d", progress=False, auto_adjust=True)
     if raw is None or raw.empty:
         raise HTTPException(status_code=502, detail=f"No price data for {ticker}")
 
@@ -227,10 +236,15 @@ def series(
 
     df = _fetch_full_history(ticker)
 
-    days = TIMEFRAMES[timeframe]
-    if days is not None:
-        cutoff = df.index.max() - pd.Timedelta(days=days)
+    tf_val = TIMEFRAMES[timeframe]
+    if tf_val == "train":
+        df = df[df.index <= pd.Timestamp(pipeline.TRAIN_END_DATE)]
+    elif tf_val == "test":
+        df = df[df.index >= pd.Timestamp(pipeline.TEST_START_DATE)]
+    elif isinstance(tf_val, int):
+        cutoff = df.index.max() - pd.Timedelta(days=tf_val)
         df = df[df.index >= cutoff]
+    # None -> full window, no filter
     if df.empty:
         raise HTTPException(status_code=404, detail="No data in this window")
 
@@ -242,13 +256,17 @@ def series(
     )
 
     return {
-        "ticker": ticker,
-        "sector": SECTOR_LABEL.get(TICKER_SECTOR[ticker], ""),
-        "timeframe": timeframe,
-        "model": model,
-        "real": {"dates": dates, "close": closes},
-        "prediction": pred,
-        "stats": _series_stats(dates, closes, pred),
+        "ticker":      ticker,
+        "sector":      SECTOR_LABEL.get(TICKER_SECTOR[ticker], ""),
+        "timeframe":   timeframe,
+        "model":       model,
+        "real":        {"dates": dates, "close": closes},
+        "prediction":  pred,
+        "stats":       _series_stats(dates, closes, pred),
+        "train_end":   pipeline.TRAIN_END_DATE,
+        "test_start":  pipeline.TEST_START_DATE,
+        "data_start":  pipeline.DATA_START,
+        "data_end":    "2020-06-11",
     }
 
 

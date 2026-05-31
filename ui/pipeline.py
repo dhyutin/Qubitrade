@@ -13,12 +13,16 @@ fetched together — `get_panel()` does that once and caches the result.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import json
 import os
 import pickle
 import time
 from pathlib import Path
 
+# torch must come BEFORE lightgbm — otherwise lightgbm's OpenMP runtime claims
+# libomp and torch ops segfault silently on the first forward pass (macOS).
+import torch  # noqa: F401
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
@@ -28,6 +32,12 @@ WORKSPACE = Path(__file__).resolve().parent.parent / "workspace"
 MODELS_DIR = WORKSPACE / "models"
 KRONOS_REPO = WORKSPACE / "external" / "Kronos"  # cloned repo (see README)
 DATA_DIR = WORKSPACE / "data"
+
+# Fixed historical window — matches notebooks 01/02 exactly.
+DATA_START      = "2013-01-01"
+DATA_END        = "2020-06-12"   # exclusive upper bound for yfinance (data thru 2020-06-11)
+TRAIN_END_DATE  = "2018-12-31"
+TEST_START_DATE = "2019-01-01"
 
 with open(MODELS_DIR / "signal_cols.json") as f:
     _META = json.load(f)
@@ -45,9 +55,11 @@ BASE_SIGNALS = [
 FORECAST_HORIZON_DAYS = 5
 
 def _has_module(name: str) -> bool:
+    """Is the package importable? Uses find_spec so we don't actually execute
+    the module — some packages (timesfm in particular) have heavy side effects
+    on import that destabilize the rest of the process."""
     try:
-        importlib.import_module(name)
-        return True
+        return importlib.util.find_spec(name) is not None
     except Exception:
         return False
 
@@ -64,6 +76,15 @@ def _kronos_available() -> bool:
     return (KRONOS_REPO / "model" / "__init__.py").exists()
 
 
+_NN_ARTIFACTS = ["nn_mlp.pt", "nn_transformer.pt", "nn_weekly.pt", "nn_monthly.pt",
+                 "nn_quarterly.pt", "nn_meta_learner.pkl", "nn_scaler.pkl",
+                 "nn_features.json"]
+
+
+def _nn_available() -> bool:
+    return all((MODELS_DIR / f).exists() for f in _NN_ARTIFACTS)
+
+
 # Registry order = dropdown order. The `available` predicate gates whether the
 # key shows up in the UI at all — we never expose a model whose backend can't
 # load on this machine.
@@ -73,7 +94,15 @@ _MODEL_REGISTRY = [
     ("ridge",         "Ridge",         "L2-regularized linear regression",           lambda: _sklearn_available("ridge")),
     ("linear_reg",    "LinearReg",     "Ordinary least squares",                     lambda: _sklearn_available("linear_reg")),
     ("ensemble",      "Ensemble",      "Mean of LightGBM + Linear + Ridge + RF",     lambda: _sklearn_available("ridge")),
-    ("agent_ensemble","Agent ensemble","LangChain agent weights: 0.4 LGB · 0.3 XpyQ · 0.2 VQC · 0.1 Chronos", lambda: True),
+    ("agent_ensemble","Wtd Ensemble","Static weights: 0.4 LGB · 0.3 XpyQ · 0.2 VQC · 0.1 Chronos", lambda: True),
+    # Neural ensemble (notebook 02.2). All six load from the same nn_*.pt /
+    # nn_meta_learner.pkl bundle, so one availability check covers them all.
+    ("nn_mlp",        "NN-MLP",        "3-layer MLP on 28 signals (Stage 2.2)",         _nn_available),
+    ("nn_transformer","NN-Transformer","4-head Transformer, 20d lookback (Stage 2.2)",  _nn_available),
+    ("nn_weekly",     "NN-Weekly",     "LSTM, 5d lookback — weekly momentum",           _nn_available),
+    ("nn_monthly",    "NN-Monthly",    "LSTM, 21d lookback — monthly trend",            _nn_available),
+    ("nn_quarterly",  "NN-Quarterly",  "LSTM, 63d lookback — quarterly regime",         _nn_available),
+    ("nn_meta",       "NN-Meta",       "Ridge meta-learner over all 5 neural models",   _nn_available),
     ("momentum",      "Momentum",      "Naive 5-day momentum baseline",              lambda: True),
     ("vqc",           "VQC",           "Variational Quantum Circuit (4 qubits)",     lambda: _has_module("pennylane")),
     ("chronos",       "Chronos",       "Amazon zero-shot time-series transformer",   lambda: _has_module("chronos")),
@@ -94,7 +123,15 @@ _METRIC_LABEL_TO_KEY = {
     "linearreg":      "linear_reg",
     "ridge":          "ridge",
     "randomforest":   "random_forest",
-    "ensemble":       "agent_ensemble",  # CSV's "Ensemble" = the notebook weighted blend
+    "ensemble":       "ensemble",        # classical equal-weight ensemble
+    # Notebook 02.2 names. The neural comparison numbers aren't in the CSV yet;
+    # these mappings let the metrics drop into place automatically once they are.
+    "mlp":            "nn_mlp",
+    "transformer":    "nn_transformer",
+    "nn-weekly":      "nn_weekly",
+    "nn-monthly":     "nn_monthly",
+    "nn-quarterly":   "nn_quarterly",
+    "metalearner":    "nn_meta",
     "mom_5d (naive)": "momentum",
     "vqc":            "vqc",
     "chronos":        "chronos",
@@ -273,7 +310,7 @@ def get_panel() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
         return _PANEL_CACHE[1], _PANEL_CACHE[2], _PANEL_CACHE[3]
 
     raw = yf.download(
-        TICKERS, period="2y", interval="1d",
+        TICKERS, start=DATA_START, end=DATA_END, interval="1d",
         progress=False, auto_adjust=True, group_by="column",
     )
     if raw is None or raw.empty:
@@ -764,6 +801,361 @@ def _predict_kronos(ticker: str, panels: dict[str, pd.DataFrame]) -> pd.Series:
     return s.reindex(px.index).ffill().dropna().rename("pred_fwd5")
 
 
+# --- Neural ensemble (notebook 02.2): MLP, Transformer, 3 LSTMs, Ridge meta ---
+_NN_BUNDLE: dict | None = None
+
+
+def _get_nn_bundle() -> dict:
+    """Lazy-load all 6 neural artifacts in one shot. Heavy torch import."""
+    global _NN_BUNDLE
+    if _NN_BUNDLE is not None:
+        return _NN_BUNDLE
+
+    import torch as _torch
+    import torch.nn as _nn
+
+    # Force CPU. MPS path is unstable for these custom nets under uvicorn —
+    # silent segfaults inside Transformer/LSTM forward on Apple Silicon.
+    _torch.set_default_device("cpu")
+
+    with open(MODELS_DIR / "nn_features.json") as f:
+        meta = json.load(f)
+    signal_cols = meta["signal_cols"]
+    n_features = len(signal_cols)
+    dropout = meta["dropout"]
+
+    # Net classes — must match the training script's architectures exactly.
+    class MLPForecaster(_nn.Module):
+        def __init__(self, n_in, hidden):
+            super().__init__()
+            layers, dim = [], n_in
+            for h in hidden:
+                layers += [_nn.Linear(dim, h), _nn.LayerNorm(h), _nn.GELU(), _nn.Dropout(dropout)]
+                dim = h
+            layers.append(_nn.Linear(dim, 1))
+            self.net = _nn.Sequential(*layers)
+
+        def forward(self, x):
+            return self.net(x).squeeze(-1)
+
+    class TemporalTransformer(_nn.Module):
+        def __init__(self, n_features, d_model, nhead, num_layers):
+            super().__init__()
+            self.input_proj = _nn.Linear(n_features, d_model)
+            self.pos_enc = _nn.Parameter(_torch.zeros(1, 512, d_model))
+            enc = _nn.TransformerEncoderLayer(
+                d_model=d_model, nhead=nhead, dim_feedforward=d_model * 4,
+                dropout=dropout, batch_first=True, norm_first=True,
+            )
+            self.encoder = _nn.TransformerEncoder(enc, num_layers=num_layers)
+            self.head = _nn.Sequential(_nn.LayerNorm(d_model), _nn.Linear(d_model, 1))
+
+        def forward(self, x):
+            T = x.size(1)
+            x = self.input_proj(x) + self.pos_enc[:, :T, :]
+            x = self.encoder(x)
+            return self.head(x[:, -1, :]).squeeze(-1)
+
+    class ScaleLSTM(_nn.Module):
+        def __init__(self, n_features, hidden, n_layers):
+            super().__init__()
+            self.lstm = _nn.LSTM(
+                input_size=n_features, hidden_size=hidden, num_layers=n_layers,
+                batch_first=True, dropout=dropout if n_layers > 1 else 0.0,
+            )
+            self.head = _nn.Sequential(
+                _nn.LayerNorm(hidden), _nn.Dropout(dropout), _nn.Linear(hidden, 1),
+            )
+
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.head(out[:, -1, :]).squeeze(-1)
+
+    def _load(model, fname):
+        model = model.to("cpu")
+        state = _torch.load(MODELS_DIR / fname, map_location="cpu", weights_only=True)
+        model.load_state_dict(state)
+        return model.eval()
+
+    mlp = _load(MLPForecaster(n_features, meta["mlp_hidden"]), "nn_mlp.pt")
+    transformer = _load(
+        TemporalTransformer(
+            n_features, meta["transformer_d_model"],
+            meta["transformer_nhead"], meta["transformer_layers"],
+        ),
+        "nn_transformer.pt",
+    )
+    lstms = {
+        name: _load(
+            ScaleLSTM(n_features, meta["lstm_hidden"], meta["lstm_layers"]),
+            f"nn_{name}.pt",
+        )
+        for name in meta["scales"]
+    }
+    with open(MODELS_DIR / "nn_meta_learner.pkl", "rb") as f:
+        meta_learner = pickle.load(f)
+    with open(MODELS_DIR / "nn_scaler.pkl", "rb") as f:
+        scaler = pickle.load(f)
+
+    _NN_BUNDLE = {
+        "torch": _torch,
+        "signal_cols": signal_cols,
+        "scaler": scaler,
+        "mlp": mlp,
+        "transformer": transformer,
+        "transformer_lookback": meta["transformer_lookback"],
+        "lstms": lstms,                 # {name: model}
+        "scales": meta["scales"],       # {name: lookback}
+        "meta_learner": meta_learner,
+        "meta_features": meta["meta_features"],
+    }
+    return _NN_BUNDLE
+
+
+def _nn_scaled_feats(ticker: str, panels: dict[str, pd.DataFrame]) -> tuple:
+    """Returns (scaled_df, dates_idx) for the ticker, in notebook column order."""
+    bundle = _get_nn_bundle()
+    cols = bundle["signal_cols"]
+    feats = panels[ticker][cols].dropna()
+    if feats.empty:
+        return None, None
+    x = bundle["scaler"].transform(feats.values)
+    return pd.DataFrame(x, index=feats.index, columns=cols), feats.index
+
+
+def _predict_mlp(ticker: str, panels: dict[str, pd.DataFrame]) -> pd.Series:
+    bundle = _get_nn_bundle()
+    torch = bundle["torch"]
+    scaled, idx = _nn_scaled_feats(ticker, panels)
+    if scaled is None:
+        return pd.Series(dtype=float)
+    with torch.no_grad():
+        preds = bundle["mlp"](torch.tensor(scaled.values, dtype=torch.float32, device="cpu")).numpy()
+    return pd.Series(preds, index=idx, name="pred_fwd5")
+
+
+def _predict_seq_model(ticker, panels, key: str, lookback: int) -> pd.Series:
+    """Shared sequence inference for Transformer + the 3 LSTMs."""
+    bundle = _get_nn_bundle()
+    torch = bundle["torch"]
+    scaled, idx = _nn_scaled_feats(ticker, panels)
+    if scaled is None or len(scaled) < lookback:
+        return pd.Series(dtype=float)
+
+    # Build (n_dates_with_history, lookback, n_features) tensor.
+    arr = scaled.values
+    seqs, out_idx = [], []
+    for i in range(lookback, len(arr) + 1):
+        seqs.append(arr[i - lookback:i])
+        out_idx.append(idx[i - 1])
+    seq_tensor = torch.tensor(np.array(seqs, dtype=np.float32), device="cpu")
+
+    model = bundle["transformer"] if key == "transformer" else bundle["lstms"][key]
+    preds = []
+    batch = 256
+    with torch.no_grad():
+        for i in range(0, len(seq_tensor), batch):
+            preds.append(model(seq_tensor[i:i + batch]).numpy())
+    arr_out = np.concatenate(preds) if preds else np.array([])
+    return pd.Series(arr_out, index=out_idx, name="pred_fwd5")
+
+
+def _predict_transformer(ticker, panels):
+    bundle = _get_nn_bundle()
+    return _predict_seq_model(ticker, panels, "transformer", bundle["transformer_lookback"])
+
+
+def _predict_nn_weekly(ticker, panels):
+    return _predict_seq_model(ticker, panels, "weekly", _get_nn_bundle()["scales"]["weekly"])
+
+
+def _predict_nn_monthly(ticker, panels):
+    return _predict_seq_model(ticker, panels, "monthly", _get_nn_bundle()["scales"]["monthly"])
+
+
+def _predict_nn_quarterly(ticker, panels):
+    return _predict_seq_model(ticker, panels, "quarterly", _get_nn_bundle()["scales"]["quarterly"])
+
+
+def _predict_nn_meta(ticker, panels):
+    """Ridge meta-learner over (MLP + Transformer + 3 LSTMs). Only emits a
+    prediction on dates where every sub-model has one."""
+    bundle = _get_nn_bundle()
+    members = {
+        "mlp":          _predict_mlp(ticker, panels),
+        "transformer":  _predict_transformer(ticker, panels),
+        "nn_weekly":    _predict_nn_weekly(ticker, panels),
+        "nn_monthly":   _predict_nn_monthly(ticker, panels),
+        "nn_quarterly": _predict_nn_quarterly(ticker, panels),
+    }
+    df = pd.DataFrame(members).dropna()
+    if df.empty:
+        return pd.Series(dtype=float)
+    df = df[bundle["meta_features"]]  # enforce column order saved at training
+    preds = bundle["meta_learner"].predict(df.values)
+    return pd.Series(preds, index=df.index, name="pred_fwd5")
+
+
+
+# ── Neural models (Stage 2.2) ─────────────────────────────────────────────────
+_NEURAL_BUNDLE: dict | None = None
+
+
+def _get_neural_bundle() -> dict:
+    """Lazy-load all Stage 2.2 neural models and the shared scaler."""
+    global _NEURAL_BUNDLE
+    if _NEURAL_BUNDLE is not None:
+        return _NEURAL_BUNDLE
+
+    import torch
+    import torch.nn as nn
+
+    _DROP = 0.2
+    n_feat = len(SIGNAL_COLS)
+
+    class _MLP(nn.Module):
+        def __init__(self):
+            super().__init__()
+            layers, dim = [], n_feat
+            for h in [256, 128, 64]:
+                layers += [nn.Linear(dim, h), nn.LayerNorm(h), nn.GELU(), nn.Dropout(_DROP)]
+                dim = h
+            layers.append(nn.Linear(dim, 1))
+            self.net = nn.Sequential(*layers)
+        def forward(self, x):
+            return self.net(x).squeeze(-1)
+
+    class _LSTM(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.lstm = nn.LSTM(input_size=n_feat, hidden_size=64,
+                                num_layers=2, batch_first=True, dropout=_DROP)
+            self.head = nn.Sequential(nn.LayerNorm(64), nn.Dropout(_DROP), nn.Linear(64, 1))
+        def forward(self, x):
+            out, _ = self.lstm(x)
+            return self.head(out[:, -1, :]).squeeze(-1)
+
+    class _Transformer(nn.Module):
+        # Attribute names match the keys saved by ui/train_neural_models.py
+        # (input_proj / pos_enc / encoder) — don't rename without retraining.
+        def __init__(self):
+            super().__init__()
+            self.input_proj = nn.Linear(n_feat, 64)
+            self.pos_enc   = nn.Parameter(torch.zeros(1, 512, 64))
+            enc = nn.TransformerEncoderLayer(d_model=64, nhead=4, dim_feedforward=256,
+                                              dropout=_DROP, batch_first=True, norm_first=True)
+            self.encoder = nn.TransformerEncoder(enc, num_layers=2)
+            self.head = nn.Sequential(nn.LayerNorm(64), nn.Linear(64, 1))
+        def forward(self, x):
+            T = x.size(1)
+            x = self.input_proj(x) + self.pos_enc[:, :T, :]
+            return self.head(self.encoder(x)[:, -1, :]).squeeze(-1)
+
+    bundle: dict = {"torch": torch}
+    with open(MODELS_DIR / "nn_scaler.pkl", "rb") as f:
+        bundle["scaler"] = pickle.load(f)
+
+    _CLASSES = {
+        "nn_mlp":        _MLP,
+        "nn_weekly":     _LSTM,
+        "nn_monthly":    _LSTM,
+        "nn_quarterly":  _LSTM,
+        "nn_transformer":_Transformer,
+    }
+    for key, cls in _CLASSES.items():
+        path = MODELS_DIR / f"{key}.pt"
+        if path.exists():
+            m = cls()
+            m.load_state_dict(torch.load(str(path), map_location="cpu"))
+            m.eval()
+            bundle[key] = m
+
+    meta_path = MODELS_DIR / "nn_meta_learner.pkl"
+    if meta_path.exists():
+        with open(meta_path, "rb") as f:
+            bundle["nn_meta"] = pickle.load(f)
+
+    _NEURAL_BUNDLE = bundle
+    return _NEURAL_BUNDLE
+
+
+def _build_sequences(scaled_arr: np.ndarray, dates, lookback: int):
+    seqs, idx = [], []
+    for i in range(lookback, len(scaled_arr) + 1):
+        window = scaled_arr[i - lookback:i]
+        if np.isnan(window).any():
+            continue
+        seqs.append(window)
+        idx.append(dates[i - 1])
+    if not seqs:
+        return np.empty((0, lookback, scaled_arr.shape[1]), dtype=np.float32), []
+    return np.array(seqs, dtype=np.float32), idx
+
+
+def _predict_nn_cross(ticker: str, panels: dict, model_key: str) -> pd.Series:
+    bundle = _get_neural_bundle()
+    if model_key not in bundle:
+        return pd.Series(dtype=float)
+    torch = bundle["torch"]
+    feat  = panels[ticker].fillna(0)
+    if feat.empty:
+        return pd.Series(dtype=float)
+    X = bundle["scaler"].transform(feat.values).astype(np.float32)
+    with torch.no_grad():
+        preds = bundle[model_key](torch.tensor(X)).numpy()
+    return pd.Series(preds, index=feat.index, name="pred_fwd5")
+
+
+def _predict_nn_seq(ticker: str, panels: dict, model_key: str, lookback: int) -> pd.Series:
+    bundle = _get_neural_bundle()
+    if model_key not in bundle:
+        return pd.Series(dtype=float)
+    torch = bundle["torch"]
+    feat  = panels[ticker].fillna(0)
+    if len(feat) < lookback:
+        return pd.Series(dtype=float)
+    scaled = bundle["scaler"].transform(feat.values).astype(np.float32)
+    seqs, idx = _build_sequences(scaled, list(feat.index), lookback)
+    if len(seqs) == 0:
+        return pd.Series(dtype=float)
+    with torch.no_grad():
+        preds = bundle[model_key](torch.tensor(seqs)).numpy()
+    return pd.Series(preds, index=idx, name="pred_fwd5")
+
+
+def _predict_nn_mlp(ticker, panels):
+    return _predict_nn_cross(ticker, panels, "nn_mlp")
+
+def _predict_nn_transformer(ticker, panels):
+    return _predict_nn_seq(ticker, panels, "nn_transformer", 20)
+
+def _predict_nn_weekly(ticker, panels):
+    return _predict_nn_seq(ticker, panels, "nn_weekly", 5)
+
+def _predict_nn_monthly(ticker, panels):
+    return _predict_nn_seq(ticker, panels, "nn_monthly", 21)
+
+def _predict_nn_quarterly(ticker, panels):
+    return _predict_nn_seq(ticker, panels, "nn_quarterly", 63)
+
+
+def _predict_nn_meta(ticker: str, panels: dict) -> pd.Series:
+    bundle = _get_neural_bundle()
+    if "nn_meta" not in bundle:
+        return pd.Series(dtype=float)
+    parts = {
+        "mlp":         _predict_nn_mlp(ticker, panels),
+        "transformer": _predict_nn_transformer(ticker, panels),
+        "nn_weekly":   _predict_nn_weekly(ticker, panels),
+        "nn_monthly":  _predict_nn_monthly(ticker, panels),
+        "nn_quarterly":_predict_nn_quarterly(ticker, panels),
+    }
+    df = pd.DataFrame(parts).dropna()
+    if df.empty:
+        return pd.Series(dtype=float)
+    preds = bundle["nn_meta"].predict(df.values)
+    return pd.Series(preds, index=df.index, name="pred_fwd5")
+
 _BACKENDS = {
     "lightgbm":      _predict_lightgbm,
     "linear_reg":    _predict_linear,
@@ -777,6 +1169,13 @@ _BACKENDS = {
     "kronos":        _predict_kronos,
     "timesfm":       _predict_timesfm,
     "xpyq":          _predict_xpyq,
+    # Neural ensemble (notebook 02.2)
+    "nn_mlp":         _predict_mlp,
+    "nn_transformer": _predict_transformer,
+    "nn_weekly":      _predict_nn_weekly,
+    "nn_monthly":     _predict_nn_monthly,
+    "nn_quarterly":   _predict_nn_quarterly,
+    "nn_meta":        _predict_nn_meta,
 }
 
 
