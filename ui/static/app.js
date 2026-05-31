@@ -6,6 +6,7 @@ const state = {
   ticker: "NVDA",
   timeframe: "3M",
   forecast: 10,
+  model: "lightgbm",
 };
 
 const el = {
@@ -15,19 +16,29 @@ const el = {
   loading: document.getElementById("loading"),
   forecast: document.getElementById("forecast"),
   forecastVal: document.getElementById("forecast-val"),
+  model: document.getElementById("model"),
   stubBadge: document.getElementById("stub-badge"),
 };
 
 async function boot() {
-  const meta = await fetch("/api/tickers").then((r) => r.json());
+  const [meta, modelsResp] = await Promise.all([
+    fetch("/api/tickers").then((r) => r.json()),
+    fetch("/api/models").then((r) => r.json()),
+  ]);
   renderTickers(meta.sectors);
   renderTimeframes(meta.timeframes);
+  renderModels(modelsResp.models);
 
   el.forecast.addEventListener("input", () => {
     state.forecast = +el.forecast.value;
     el.forecastVal.textContent = state.forecast;
   });
   el.forecast.addEventListener("change", refresh);
+
+  el.model.addEventListener("change", () => {
+    state.model = el.model.value;
+    refresh();
+  });
 
   refresh();
 }
@@ -65,6 +76,18 @@ function renderTimeframes(tfs) {
   }
 }
 
+function renderModels(models) {
+  el.model.innerHTML = "";
+  for (const m of models) {
+    const opt = document.createElement("option");
+    opt.value = m.key;
+    opt.textContent = m.label;
+    if (m.desc) opt.title = m.desc;
+    if (m.key === state.model) opt.selected = true;
+    el.model.appendChild(opt);
+  }
+}
+
 function selectTicker(t) {
   state.ticker = t;
   document.querySelectorAll(".chip").forEach((c) =>
@@ -86,7 +109,7 @@ async function refresh() {
   const reqId = ++inflight;
   el.loading.hidden = false;
   try {
-    const url = `/api/series?ticker=${state.ticker}&timeframe=${state.timeframe}&forecast_days=${state.forecast}`;
+    const url = `/api/series?ticker=${state.ticker}&timeframe=${state.timeframe}&forecast_days=${state.forecast}&model=${state.model}`;
     const data = await fetch(url).then((r) => {
       if (!r.ok) throw new Error("request failed");
       return r.json();
@@ -101,6 +124,11 @@ async function refresh() {
   } finally {
     if (reqId === inflight) el.loading.hidden = true;
   }
+}
+
+function modelLabel(key) {
+  const opt = el.model.querySelector(`option[value="${key}"]`);
+  return opt ? opt.textContent : key;
 }
 
 function draw(data) {
@@ -144,7 +172,7 @@ function draw(data) {
     plot_bgcolor: "rgba(0,0,0,0)",
     font: { color: "#8b93a7", size: 12 },
     title: {
-      text: `${data.ticker} · ${data.sector}`,
+      text: `${data.ticker} · ${data.sector}${data.model ? "  ·  " + modelLabel(data.model) : ""}`,
       font: { color: "#e7ebf3", size: 15 },
       x: 0.01,
     },

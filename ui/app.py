@@ -21,6 +21,7 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
+import pipeline
 import predictor
 
 # --- Universe (matches PLAN.md Stage 1) -----------------------------------
@@ -87,11 +88,21 @@ def list_tickers():
     }
 
 
+@app.get("/api/models")
+def list_models():
+    """Available prediction models for the dropdown."""
+    return {"models": pipeline.AVAILABLE_MODELS}
+
+
+_VALID_MODELS = {m["key"] for m in pipeline.AVAILABLE_MODELS}
+
+
 @app.get("/api/series")
 def series(
     ticker: str = Query(...),
     timeframe: str = Query("3M"),
     forecast_days: int = Query(10, ge=0, le=60),
+    model: str = Query("lightgbm"),
 ):
     """Real prices (black) + prediction overlay (green) for one ticker."""
     ticker = ticker.upper()
@@ -99,6 +110,8 @@ def series(
         raise HTTPException(status_code=404, detail=f"Unknown ticker {ticker}")
     if timeframe not in TIMEFRAMES:
         raise HTTPException(status_code=400, detail=f"Unknown timeframe {timeframe}")
+    if model not in _VALID_MODELS:
+        raise HTTPException(status_code=400, detail=f"Unknown model {model}")
 
     df = _fetch_full_history(ticker)
 
@@ -112,12 +125,15 @@ def series(
     dates = [d.strftime("%Y-%m-%d") for d in df.index]
     closes = [round(float(c), 4) for c in df["close"].tolist()]
 
-    pred = predictor.predict(ticker, dates, closes, forecast_days=forecast_days)
+    pred = predictor.predict(
+        ticker, dates, closes, forecast_days=forecast_days, model=model,
+    )
 
     return {
         "ticker": ticker,
         "sector": SECTOR_LABEL.get(TICKER_SECTOR[ticker], ""),
         "timeframe": timeframe,
+        "model": model,
         "real": {"dates": dates, "close": closes},
         "prediction": pred,
     }
