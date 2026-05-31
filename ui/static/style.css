@@ -7,6 +7,7 @@
   --muted: #8b93a7;
   --green: #1f9d4d;
   --green-soft: rgba(31, 157, 77, 0.15);
+  --red: #e0524f;
   --black-line: #e7ebf3; /* "black" real line, light on dark theme */
   --accent: #4f7cff;
 }
@@ -22,7 +23,7 @@ html, body {
 }
 
 .frame {
-  max-width: 1100px;
+  max-width: 1240px;
   margin: 0 auto;
   min-height: 100vh;
   padding: 22px 26px 18px;
@@ -98,28 +99,126 @@ h1 { margin: 0; font-size: 22px; letter-spacing: 0.3px; }
   box-shadow: 0 0 0 3px var(--green-soft);
 }
 
-/* ---------- chart ---------- */
+/* ---------- stat strip ---------- */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+}
+.stat-card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 12px 16px;
+}
+.stat-label {
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+}
+.stat-value { font-size: 22px; font-weight: 700; margin-top: 4px; }
+.stat-value.up { color: var(--green); }
+.stat-value.down { color: var(--red); }
+.stat-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+
+/* ---------- main grid: chart + analog panel ---------- */
+.main-grid {
+  display: grid;
+  grid-template-columns: 1fr 300px;
+  gap: 14px;
+  flex: 1;
+  min-height: 0;
+}
+
 .chart-wrap {
   position: relative;
-  flex: 1;
   background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 14px;
   padding: 10px;
-  min-height: 380px;
+  min-height: 400px;
 }
-#chart { width: 100%; height: 100%; min-height: 360px; }
-.loading {
+#chart { width: 100%; height: 100%; min-height: 380px; }
+
+/* shimmer skeleton */
+.skeleton {
   position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: var(--muted);
-  font-size: 14px;
-  background: rgba(13, 15, 20, 0.55);
-  border-radius: 14px;
+  inset: 10px;
+  border-radius: 10px;
+  background: linear-gradient(100deg, var(--panel-2) 30%, #262b39 50%, var(--panel-2) 70%);
+  background-size: 200% 100%;
+  animation: shimmer 1.2s infinite linear;
 }
-.loading[hidden] { display: none; }
+.skeleton[hidden] { display: none; }
+@keyframes shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+
+/* ---------- analog panel ---------- */
+.analog-panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow: auto;
+}
+.analog-panel h2 {
+  margin: 0;
+  font-size: 13px;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.q-tag {
+  font-size: 10px;
+  color: var(--accent);
+  background: rgba(79, 124, 255, 0.1);
+  border: 1px solid rgba(79, 124, 255, 0.3);
+  padding: 2px 7px;
+  border-radius: 999px;
+  letter-spacing: 0.3px;
+}
+.narration {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--panel-2);
+  border-left: 3px solid var(--green);
+  padding: 10px 12px;
+  border-radius: 8px;
+}
+.analog-list { display: flex; flex-direction: column; gap: 8px; }
+.analog-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+}
+.analog-meta { display: flex; flex-direction: column; gap: 3px; }
+.analog-date { font-size: 13px; font-weight: 700; }
+.analog-tag {
+  font-size: 10.5px;
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+}
+.analog-sim {
+  font-size: 10px;
+  color: var(--accent);
+}
+.analog-fwd { font-size: 15px; font-weight: 700; }
+.analog-fwd.up { color: var(--green); }
+.analog-fwd.down { color: var(--red); }
+.method { margin: 0; font-size: 10.5px; color: var(--muted); font-style: italic; }
 
 /* ---------- bottom bar ---------- */
 .bottombar {
@@ -159,3 +258,10 @@ h1 { margin: 0; font-size: 22px; letter-spacing: 0.3px; }
 }
 .forecast input { accent-color: var(--green); }
 #forecast-val { color: var(--text); font-weight: 700; }
+
+/* ---------- responsive ---------- */
+@media (max-width: 860px) {
+  .main-grid { grid-template-columns: 1fr; }
+  .stats { grid-template-columns: repeat(2, 1fr); }
+  .analog-panel { max-height: 320px; }
+}

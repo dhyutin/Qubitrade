@@ -16,6 +16,8 @@ predict(ticker, dates, closes, forecast_days) -> {
                                          # future by `forecast_days`
     "pred_close": [float, ...],          # predicted price path (the green line),
                                          # aligned 1:1 with pred_dates
+    "pred_upper": [float, ...],          # upper edge of the confidence band
+    "pred_lower": [float, ...],          # lower edge of the confidence band
     "split_date": ISO date str,          # where the prediction starts (last real
                                          # point the green line is anchored to)
     "is_stub": bool,
@@ -84,7 +86,10 @@ def predict(
     into the future.
     """
     if not closes:
-        return {"pred_dates": [], "pred_close": [], "split_date": None, "is_stub": STUB}
+        return {
+            "pred_dates": [], "pred_close": [], "pred_upper": [], "pred_lower": [],
+            "split_date": None, "is_stub": STUB,
+        }
 
     ts = [pd.Timestamp(d) for d in dates]
     n = len(closes)
@@ -114,9 +119,25 @@ def predict(
     pred_dates = ts[split_idx:] + future_dates
     pred_dates = pred_dates[: len(pred_close)]
 
+    # Confidence band: widens with the forecast horizon (~ vol * sqrt(t)),
+    # zero inside the overlap region where we can still see the real price.
+    if len(closes) >= 12:
+        rets = [closes[i] / closes[i - 1] - 1.0 for i in range(1, len(closes))]
+        daily_vol = (sum(r * r for r in rets[-30:]) / min(len(rets), 30)) ** 0.5
+    else:
+        daily_vol = 0.0
+    pred_upper, pred_lower = [], []
+    for i, p in enumerate(pred_close):
+        future_step = max(i - n_overlap, 0)          # 0 until forecast starts
+        width = p * daily_vol * 1.96 * math.sqrt(future_step)
+        pred_upper.append(round(p + width, 4))
+        pred_lower.append(round(p - width, 4))
+
     return {
         "pred_dates": [d.strftime("%Y-%m-%d") for d in pred_dates],
         "pred_close": [round(float(p), 4) for p in pred_close],
+        "pred_upper": pred_upper,
+        "pred_lower": pred_lower,
         "split_date": ts[split_idx].strftime("%Y-%m-%d"),
         "is_stub": STUB,
     }

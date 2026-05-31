@@ -23,10 +23,22 @@
     <!-- TOP: ticker selector -->
     <section class="tickers" id="tickers"></section>
 
-    <!-- MIDDLE: chart -->
-    <section class="chart-wrap">
-      <div id="chart"></div>
-      <div id="loading" class="loading" hidden>loading…</div>
+    <!-- STAT STRIP -->
+    <section class="stats" id="stats"></section>
+
+    <!-- MIDDLE: chart + analog panel -->
+    <section class="main-grid">
+      <div class="chart-wrap">
+        <div id="chart"></div>
+        <div id="skeleton" class="skeleton" hidden></div>
+      </div>
+
+      <aside class="analog-panel">
+        <h2>Most similar regimes <span class="q-tag">⚛ kernel</span></h2>
+        <p id="narration" class="narration"></p>
+        <div id="analogs" class="analog-list"></div>
+        <p id="analog-method" class="method"></p>
+      </aside>
     </section>
 
     <!-- BOTTOM: timeframe selector + controls -->
